@@ -757,7 +757,7 @@ venv/bin/pip install vllm==0.28.0 huggingface_hub hf_transfer ninja \
 # vLLM's C extension.
 
 # model, ~19.5 GB
-HF_HUB_ENABLE_HF_TRANSFER=1 venv/bin/hf download \
+HF_XET_HIGH_PERFORMANCE=1 venv/bin/hf download \
   dbirks/Qwen3.8-27B-W4A16-AutoRound \
   --local-dir models/Qwen3.8-27B-W4A16-AutoRound
 
@@ -780,11 +780,16 @@ venv/bin/python prepare/fetch_thirdparty.py
 venv/bin/python prepare/quant_heads_stream.py models/Qwen3.8-27B-Uncensored-W4A16
 
 # patch vllm (all compatible patches are written against 0.28.0; reapply after upgrades)
-for p in patches/*.patch; do
-  case "$p" in
-    patches/dflash2-backport.patch) echo "skip $p (DFlash2 is native in vLLM 0.28.0)"; continue ;;
+# Order is patches/series, one basename per line: a few patches carry hunk context
+# that an earlier patch adds, so the glob order of the directory is wrong. A new
+# independent patch goes on the last line; one that must apply before an existing
+# patch is listed before it.
+sed -e 's/#.*//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' patches/series |
+while IFS= read -r name; do
+  case "$name" in
+    dflash2-backport.patch) echo "skip $name (DFlash2 is native in vLLM 0.28.0)"; continue ;;
   esac
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < "$p"
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < "patches/$name"
 done
 # optional: the KVarN 4/2-bit KV cache for 262k context (docs/long-context.md)
 bash kvarn/install.sh
@@ -821,6 +826,53 @@ Tool calling works over the same endpoint — send `tools` with `tool_choice:
 `--enable-auto-tool-choice --tool-call-parser qwen3_coder`; the parser has to
 read Qwen's XML call format, which is what this model's chat template emits —
 not the JSON that `hermes` reads. `TOOLS=0` turns it off.
+
+### OpenCode (optional)
+
+If you want to point [OpenCode](https://opencode.ai) at this local vLLM server,
+add an `opencode.json` file in the directory where you run it from, or place it
+in `~/.config/opencode/`. The base URL must include `/v1`, and the model name
+must match what the server is serving — `http://127.0.0.1:18020/v1` and
+`qwen3.8-27b` for the default single-user setup shown here.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "qwen-local/qwen3.8-27b",
+  "provider": {
+    "qwen-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Qwen 3.8 27B (local RTX 3090)",
+      "options": {
+        "baseURL": "http://127.0.0.1:18020/v1",
+        "apiKey": "$VLLM_API_KEY"
+      },
+      "models": {
+        "qwen3.8-27b": {
+          "name": "Qwen 3.8 27B",
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+With the server running, install the OpenCode CLI and launch it from the same
+location:
+
+```bash
+opencode
+```
+
+If auth is disabled, any placeholder value works for `apiKey`; if you enabled
+`VLLM_API_KEY`, set the same value here. The `context` value above assumes the
+default `CTX=fast` profile (`65536`); `CTX=long` is `131072`, and `CTX=huge` is
+`245760`. Under-declaring the window can make the client silently truncate
+context.
 
 To check the numbers on your own card: `bash verify.sh` (also probes the live
 server and prints which attention backend and KV pool it came up with), then
